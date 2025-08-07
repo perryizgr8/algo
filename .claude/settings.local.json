@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe nse200_algorithm.py:*)",
+      "Bash(.venv/Scripts/python.exe test_dryrun.py:*)",
+      "Bash(rm:*)",
+      "Bash(.venv/Scripts/python.exe:*)"
+    ],
+    "deny": []
+  }
+}
