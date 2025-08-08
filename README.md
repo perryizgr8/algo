@@ -64,7 +64,9 @@ python nse200_algorithm.py --cache-stats
 - **`52weeks.ipynb`** - Jupyter notebook for 12-month analysis
 - **`26weeks.ipynb`** - Jupyter notebook for 6-month analysis
 - **`algo.md`** - Detailed algorithm documentation
+- **`update_nse200_simple.py`** - NSE 200 list updater script
 - **`.cache/`** - Directory for cached API responses (auto-created)
+- **`backups/`** - Automatic backups of NSE 200 files (auto-created)
 
 ## Algorithm Logic
 
@@ -160,6 +162,46 @@ The algorithm includes a sophisticated caching system to improve performance:
   - `--clear-cache`: Clear all cached data
 - **Storage**: Cache files are stored in `.cache/` directory (auto-created)
 - **Benefits**: Faster re-runs, reduced API calls, better rate limit compliance
+
+## Updating NSE 200 List
+
+The NSE 200 constituent list changes quarterly. Use the updater script to get the latest list:
+
+### **Quick Update Process:**
+
+1. **Test Connection:**
+   ```bash
+   python update_nse200_simple.py --test-upstox
+   ```
+
+2. **Get Instructions:**
+   ```bash
+   python update_nse200_simple.py --instructions
+   ```
+
+3. **Manual Download:**
+   - Visit: https://www.nseindia.com/products-services/indices-nifty200-index
+   - Download the NSE 200 constituents CSV/Excel file
+   - Save it in the project directory
+
+4. **Update List:**
+   ```bash
+   python update_nse200_simple.py --input downloaded_nse200.csv
+   ```
+
+### **What the Updater Does:**
+- **Fetches** 8000+ Upstox instrument keys automatically
+- **Matches** your downloaded NSE list with instrument keys
+- **Backs up** existing file with timestamp
+- **Shows** comparison (added/removed stocks)
+- **Updates** `ind_nifty200list.xlsx` for algorithm use
+
+### **Match Coverage:**
+- Typically achieves 95%+ match rate
+- Shows unmatched symbols for manual verification
+- Warns if match rate is below 90%
+
+**Note**: The semi-automated approach works around NSE's anti-scraping measures while still automating the tedious instrument key matching process.
 
 ## Jupyter Notebooks
 
