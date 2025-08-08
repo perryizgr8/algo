@@ -4,16 +4,18 @@ Configuration settings for NSE 200 winner algorithm
 
 import os
 from datetime import date, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # API Configuration
 UPSTOX_API_VERSION = "2.0"
 UPSTOX_BASE_URL = "https://api-v2.upstox.com"
 
-# Default API token (needs to be updated)
-DEFAULT_API_TOKEN = "***REMOVED***"
-
-# Get API token from environment variable or use default
-API_TOKEN = os.getenv('UPSTOX_API_TOKEN', DEFAULT_API_TOKEN)
+# Get API token from environment variable
+API_TOKEN = os.getenv('UPSTOX_API_TOKEN')
+if not API_TOKEN:
+    raise ValueError("UPSTOX_API_TOKEN environment variable is required")
 
 # File paths
 NSE200_FILE = 'ind_nifty200list.xlsx'
