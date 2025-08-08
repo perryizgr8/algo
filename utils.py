@@ -7,6 +7,7 @@ import requests
 from datetime import datetime
 import time
 from typing import List, Dict, Optional, Tuple
+from tqdm import tqdm
 from config import get_api_headers, UPSTOX_BASE_URL, NSE200_FILE, PORTFOLIO_VALUE, CASH_RESERVE_PERCENTAGE
 from cache import api_cache
 
@@ -142,17 +143,23 @@ def calculate_returns_for_all_stocks(weeks: int) -> List[Dict[str, any]]:
     
     print(f"Calculating {weeks}-week returns for {total_stocks} stocks...")
     
-    for idx, row in df.iterrows():
-        symbol = row['Symbol']
-        instkey = row['instrument_key']
-        
-        print(f"Processing {idx+1}/{total_stocks}: {symbol}")
-        
-        returns = get_returns(instkey, weeks)
-        sym_returns[symbol] = returns if returns is not None else 0
-        
-        # Small delay to avoid rate limiting
-        time.sleep(0.1)
+    # Use tqdm for clean progress display
+    with tqdm(total=total_stocks, desc="Processing stocks", unit="stock") as pbar:
+        for idx, row in df.iterrows():
+            symbol = row['Symbol']
+            instkey = row['instrument_key']
+            
+            pbar.set_description(f"Processing {symbol}")
+            
+            returns = get_returns(instkey, weeks)
+            sym_returns[symbol] = returns if returns is not None else 0
+            
+            pbar.update(1)
+            
+            # Small delay to avoid rate limiting
+            time.sleep(0.05)  # Reduced delay since cache is faster now
+    
+    print("\nSorting stocks by performance...")
     
     # Sort by returns (highest first)
     sorted_returns = []
@@ -285,7 +292,13 @@ def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[s
     current_symbols = set(df['Symbol'].values)
     total_investment = 0.0
     
-    for symbol in buy_list:
+    if not debug_prices:
+        print("\nProcessing buy orders...")
+    
+    # Use progress bar for buy orders
+    buy_iterator = tqdm(buy_list, desc="Processing buys", unit="stock") if not debug_prices else buy_list
+    
+    for symbol in buy_iterator:
         # Find instrument key
         nse_row = nse200_df[nse200_df['Symbol'] == symbol]
         if nse_row.empty:
@@ -296,6 +309,8 @@ def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[s
         
         if debug_prices:
             print(f"Fetching price for {symbol}...")
+        elif hasattr(buy_iterator, 'set_description'):
+            buy_iterator.set_description(f"Processing {symbol}")
         
         # Get units and price in one call to avoid redundant API requests
         units_to_buy, current_price = calculate_units_to_buy(
@@ -330,6 +345,8 @@ def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[s
     print(f"Initial remaining cash: ₹{remaining_cash:,.2f}")
     
     # Redistribute remaining cash to minimize leftover cash
+    if remaining_cash > 1000:
+        print("Redistributing remaining cash...")
     df, final_remaining_cash = redistribute_remaining_cash(df, nse200_df, remaining_cash)
     
     # Update cash position with final remaining amount
