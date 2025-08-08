@@ -223,6 +223,95 @@ def calculate_portfolio_changes(current_portfolio: pd.DataFrame,
     return buy, sell, hold
 
 
+def smart_allocate_cash(buy_list: List[str], nse200_df: pd.DataFrame, available_cash: float, debug: bool = False) -> Dict[str, float]:
+    """
+    Smart cash allocation that prioritizes top performers and handles expensive stocks
+    
+    Args:
+        buy_list: List of symbols to buy (in priority order - best performers first)
+        nse200_df: NSE200 data with instrument keys
+        available_cash: Total cash available for investment
+        debug: Enable debug output
+        
+    Returns:
+        Dict mapping symbol to allocation amount
+    """
+    if debug:
+        print(f"Smart allocation: ₹{available_cash:,.2f} across {len(buy_list)} stocks")
+    
+    # Step 1: Get prices for all stocks
+    stock_prices = {}
+    min_allocation = available_cash * 0.02  # Minimum 2% allocation per stock
+    
+    for symbol in buy_list:
+        nse_row = nse200_df[nse200_df['Symbol'] == symbol]
+        if not nse_row.empty:
+            instkey = nse_row.iloc[0]['instrument_key']
+            units, price = calculate_units_to_buy(symbol, instkey, min_allocation, use_fallback=True, debug=False)
+            if price > 0:
+                stock_prices[symbol] = price
+    
+    if not stock_prices:
+        if debug:
+            print("No valid prices found, falling back to equal allocation")
+        equal_allocation = available_cash / len(buy_list)
+        return {symbol: equal_allocation for symbol in buy_list}
+    
+    # Step 2: Priority-based allocation
+    allocations = {}
+    remaining_cash = available_cash
+    remaining_stocks = list(buy_list)
+    
+    # Strategy: Ensure every stock gets at least 1 unit if possible
+    # Then distribute remaining cash by priority
+    
+    # Phase 1: Guarantee at least 1 unit for each stock (starting with top performers)
+    guaranteed_investment = 0
+    affordable_stocks = []
+    
+    for symbol in buy_list:
+        if symbol in stock_prices:
+            price = stock_prices[symbol]
+            if price <= remaining_cash:
+                allocations[symbol] = price  # Allocate exactly 1 unit
+                guaranteed_investment += price
+                remaining_cash -= price
+                affordable_stocks.append(symbol)
+                if debug:
+                    print(f"  Guaranteed 1 unit of {symbol} @ ₹{price:.2f}")
+            else:
+                if debug:
+                    print(f"  {symbol} too expensive (₹{price:.2f} > ₹{remaining_cash:.2f})")
+    
+    # Phase 2: Distribute remaining cash proportionally by priority weight
+    if remaining_cash > 0 and affordable_stocks:
+        # Priority weights: Top stock gets 20x weight, decreases exponentially
+        total_weight = 0
+        weights = {}
+        
+        for i, symbol in enumerate(affordable_stocks):
+            # Exponential decay: top stock gets highest weight
+            weight = 20 * (0.8 ** i)  # 20, 16, 12.8, 10.24, ...
+            weights[symbol] = weight
+            total_weight += weight
+        
+        # Distribute remaining cash by weight
+        for symbol in affordable_stocks:
+            additional_allocation = (weights[symbol] / total_weight) * remaining_cash
+            allocations[symbol] += additional_allocation
+            
+            if debug:
+                total_allocation = allocations[symbol]
+                units_possible = int(total_allocation // stock_prices[symbol])
+                print(f"  {symbol}: ₹{total_allocation:.2f} ({units_possible} units) [weight: {weights[symbol]:.1f}]")
+    
+    if debug:
+        total_allocated = sum(allocations.values())
+        print(f"Total allocated: ₹{total_allocated:.2f} ({total_allocated/available_cash*100:.1f}%)")
+    
+    return allocations
+
+
 def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[str], extra_money: float = 0, debug_prices: bool = False) -> None:
     """
     Update portfolio CSV file with buy and sell decisions and calculate actual units
@@ -283,22 +372,32 @@ def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[s
         df = df[df['Symbol'] != symbol]
         print(f"Sold all units of {symbol}")
     
-    # Calculate allocation per stock for buy list
+    # Smart allocation based on priority and stock prices
     if buy_list:
-        allocation_per_stock = available_cash / len(buy_list)
-        print(f"Allocation per stock: ₹{allocation_per_stock:,.2f}")
+        print(f"\nCalculating smart allocation for {len(buy_list)} stocks...")
+        allocations = smart_allocate_cash(buy_list, nse200_df, available_cash, debug=debug_prices)
+        print(f"Smart allocation completed")
+    else:
+        allocations = {}
     
     # Process buy list - update existing or add new positions
     current_symbols = set(df['Symbol'].values)
     total_investment = 0.0
     
-    if not debug_prices:
+    if not debug_prices and allocations:
         print("\nProcessing buy orders...")
     
     # Use progress bar for buy orders
     buy_iterator = tqdm(buy_list, desc="Processing buys", unit="stock") if not debug_prices else buy_list
     
     for symbol in buy_iterator:
+        if symbol not in allocations:
+            if debug_prices:
+                print(f"No allocation for {symbol}, skipping")
+            continue
+            
+        allocation_amount = allocations[symbol]
+        
         # Find instrument key
         nse_row = nse200_df[nse200_df['Symbol'] == symbol]
         if nse_row.empty:
@@ -308,13 +407,13 @@ def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[s
         instkey = nse_row.iloc[0]['instrument_key']
         
         if debug_prices:
-            print(f"Fetching price for {symbol}...")
+            print(f"Processing {symbol} with allocation ₹{allocation_amount:.2f}...")
         elif hasattr(buy_iterator, 'set_description'):
             buy_iterator.set_description(f"Processing {symbol}")
         
         # Get units and price in one call to avoid redundant API requests
         units_to_buy, current_price = calculate_units_to_buy(
-            symbol, instkey, allocation_per_stock, use_fallback=True, debug=debug_prices
+            symbol, instkey, allocation_amount, use_fallback=True, debug=debug_prices
         )
         
         if units_to_buy > 0 and current_price > 0:
@@ -332,7 +431,7 @@ def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[s
                 print(f"Added {symbol}: {units_to_buy} units @ ₹{current_price:.2f} = ₹{investment_amount:,.2f}")
         else:
             if debug_prices:
-                print(f"Skipped {symbol}: units={units_to_buy}, price={current_price}")
+                print(f"Skipped {symbol}: units={units_to_buy}, price={current_price}, allocation=₹{allocation_amount:.2f}")
             else:
                 print(f"Skipped {symbol}: Could not determine units to buy")
     
