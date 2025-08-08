@@ -28,6 +28,11 @@ TOP_40_COUNT = 40
 WEEKS_12M = 52
 WEEKS_6M = 26
 
+# Capital management
+DEFAULT_PORTFOLIO_VALUE = 1000000  # 10 lakh rupees
+PORTFOLIO_VALUE = float(os.getenv('PORTFOLIO_VALUE', DEFAULT_PORTFOLIO_VALUE))
+CASH_RESERVE_PERCENTAGE = 0.05  # Keep 5% as cash reserve
+
 # API request headers
 def get_api_headers():
     return {

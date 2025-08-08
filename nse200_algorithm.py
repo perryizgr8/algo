@@ -32,16 +32,20 @@ from utils import (
 )
 
 
-def run_algorithm(strategy: str, dry_run: bool = False) -> None:
+def run_algorithm(strategy: str, dry_run: bool = False, extra_money: float = 0, debug_prices: bool = False) -> None:
     """
     Run the NSE 200 winner algorithm
     
     Args:
         strategy: Either '12m' for 12-month or '6m' for 6-month strategy
         dry_run: If True, show changes without updating files
+        extra_money: Additional money to invest (default: 0)
+        debug_prices: Enable debug output for price fetching
     """
     print(f"NSE 200 Winner Algorithm - {strategy.upper()} Strategy")
     print(f"Date: {date.today()}")
+    if extra_money > 0:
+        print(f"Additional Investment: ₹{extra_money:,.2f}")
     print("=" * 60)
     
     # Determine parameters based on strategy
@@ -90,10 +94,12 @@ def run_algorithm(strategy: str, dry_run: bool = False) -> None:
         # Step 6: Update portfolio
         if dry_run:
             print(f"\nDRY RUN: Would update {portfolio_file}")
+            if extra_money > 0:
+                print(f"Would add ₹{extra_money:,.2f} additional investment")
             print("No files were modified.")
         else:
             print(f"\nStep 5: Updating portfolio file...")
-            update_portfolio(portfolio_file, buy_list, sell_list)
+            update_portfolio(portfolio_file, buy_list, sell_list, extra_money, debug_prices)
         
         print(f"\nAlgorithm completed successfully!")
         if not dry_run:
@@ -116,15 +122,19 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python nse200_algorithm.py --strategy 12m    # Run 12-month strategy
-  python nse200_algorithm.py --strategy 6m     # Run 6-month strategy
+  python nse200_algorithm.py --strategy 12m                    # Run 12-month strategy
+  python nse200_algorithm.py --strategy 6m                     # Run 6-month strategy
+  python nse200_algorithm.py --strategy 12m --extra-money 50000  # Add ₹50,000 extra investment
+  python nse200_algorithm.py --strategy 6m --dry-run           # Preview changes without saving
   
 The algorithm will:
 1. Calculate returns for all NSE 200 stocks
-2. Rank them by performance
+2. Rank them by performance  
 3. Select top 20 for buying
 4. Sell stocks not in top 40
-5. Update the portfolio CSV file
+5. Add any extra money to available cash
+6. Redistribute remaining cash to minimize leftovers
+7. Update the portfolio CSV file
         """
     )
     
@@ -152,6 +162,18 @@ The algorithm will:
         help='Show cache statistics and exit'
     )
     
+    parser.add_argument(
+        '--extra-money',
+        type=float,
+        help='Additional money to invest (in rupees). Example: --extra-money 50000'
+    )
+    
+    parser.add_argument(
+        '--debug-prices',
+        action='store_true',
+        help='Enable debug output for price fetching issues'
+    )
+    
     args = parser.parse_args()
     
     # Handle cache operations first
@@ -177,7 +199,7 @@ The algorithm will:
         # Clean up expired cache files before running
         cleanup_expired_cache()
         
-        run_algorithm(args.strategy, args.dry_run)
+        run_algorithm(args.strategy, args.dry_run, args.extra_money or 0, args.debug_prices)
 
 
 if __name__ == "__main__":

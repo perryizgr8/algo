@@ -7,7 +7,7 @@ import requests
 from datetime import datetime
 import time
 from typing import List, Dict, Optional, Tuple
-from config import get_api_headers, UPSTOX_BASE_URL, NSE200_FILE
+from config import get_api_headers, UPSTOX_BASE_URL, NSE200_FILE, PORTFOLIO_VALUE, CASH_RESERVE_PERCENTAGE
 from cache import api_cache
 
 
@@ -216,31 +216,139 @@ def calculate_portfolio_changes(current_portfolio: pd.DataFrame,
     return buy, sell, hold
 
 
-def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[str]) -> None:
+def update_portfolio(portfolio_file: str, buy_list: List[str], sell_list: List[str], extra_money: float = 0, debug_prices: bool = False) -> None:
     """
-    Update portfolio CSV file with buy and sell decisions
+    Update portfolio CSV file with buy and sell decisions and calculate actual units
     
     Args:
         portfolio_file: Path to portfolio CSV file
         buy_list: List of symbols to buy
         sell_list: List of symbols to sell
+        extra_money: Additional money to invest (default: 0)
+        debug_prices: Enable debug output for price fetching
     """
     df = load_current_portfolio(portfolio_file)
+    nse200_df = load_nse200_data()
+    
+    # Get existing cash position
+    existing_cash = 0
+    cash_row = df[df['Symbol'] == 'CASH']
+    if not cash_row.empty:
+        existing_cash = float(cash_row.iloc[0]['Units'])
+    
+    # Calculate proceeds from selling positions
+    sell_proceeds = 0
+    for symbol in sell_list:
+        symbol_row = df[df['Symbol'] == symbol]
+        if not symbol_row.empty:
+            units = float(symbol_row.iloc[0]['Units'])
+            if units > 0:
+                # Find instrument key
+                nse_row = nse200_df[nse200_df['Symbol'] == symbol]
+                if not nse_row.empty:
+                    instkey = nse_row.iloc[0]['instrument_key']
+                    current_price = get_current_price(instkey, debug=debug_prices)
+                    if current_price:
+                        proceeds = units * current_price
+                        sell_proceeds += proceeds
+                        print(f"Selling {symbol}: {units} units @ ₹{current_price:.2f} = ₹{proceeds:,.2f}")
+    
+    # If this is a completely new portfolio (no existing cash or positions)
+    if existing_cash == 0 and len(df) == 0:
+        base_cash = PORTFOLIO_VALUE * (1 - CASH_RESERVE_PERCENTAGE)
+        print(f"New portfolio - using full budget: ₹{PORTFOLIO_VALUE:,.2f}")
+    else:
+        # Available cash = existing cash + proceeds from sells
+        base_cash = existing_cash + sell_proceeds
+        print(f"Existing cash: ₹{existing_cash:,.2f}")
+        if sell_proceeds > 0:
+            print(f"Sell proceeds: ₹{sell_proceeds:,.2f}")
+    
+    # Add extra money if provided
+    if extra_money > 0:
+        print(f"Extra money injection: ₹{extra_money:,.2f}")
+    
+    available_cash = base_cash + extra_money
+    print(f"Total available cash for investment: ₹{available_cash:,.2f}")
     
     # Remove sold symbols
     for symbol in sell_list:
         df = df[df['Symbol'] != symbol]
+        print(f"Sold all units of {symbol}")
     
-    # Add new symbols to buy
+    # Calculate allocation per stock for buy list
+    if buy_list:
+        allocation_per_stock = available_cash / len(buy_list)
+        print(f"Allocation per stock: ₹{allocation_per_stock:,.2f}")
+    
+    # Process buy list - update existing or add new positions
     current_symbols = set(df['Symbol'].values)
+    total_investment = 0.0
+    
     for symbol in buy_list:
-        if symbol not in current_symbols:
-            new_row = pd.DataFrame({'Symbol': [symbol], 'Units': [0]})
-            df = pd.concat([df, new_row], ignore_index=True)
+        # Find instrument key
+        nse_row = nse200_df[nse200_df['Symbol'] == symbol]
+        if nse_row.empty:
+            print(f"Warning: {symbol} not found in NSE200 data, skipping")
+            continue
+            
+        instkey = nse_row.iloc[0]['instrument_key']
+        
+        if debug_prices:
+            print(f"Fetching price for {symbol}...")
+        
+        # Get units and price in one call to avoid redundant API requests
+        units_to_buy, current_price = calculate_units_to_buy(
+            symbol, instkey, allocation_per_stock, use_fallback=True, debug=debug_prices
+        )
+        
+        if units_to_buy > 0 and current_price > 0:
+            investment_amount = units_to_buy * current_price
+            total_investment += investment_amount
+            
+            if symbol in current_symbols:
+                # Update existing position
+                df.loc[df['Symbol'] == symbol, 'Units'] = units_to_buy
+                print(f"Updated {symbol}: {units_to_buy} units @ ₹{current_price:.2f} = ₹{investment_amount:,.2f}")
+            else:
+                # Add new position
+                new_row = pd.DataFrame({'Symbol': [symbol], 'Units': [units_to_buy]})
+                df = pd.concat([df, new_row], ignore_index=True)
+                print(f"Added {symbol}: {units_to_buy} units @ ₹{current_price:.2f} = ₹{investment_amount:,.2f}")
+        else:
+            if debug_prices:
+                print(f"Skipped {symbol}: units={units_to_buy}, price={current_price}")
+            else:
+                print(f"Skipped {symbol}: Could not determine units to buy")
     
     # Save updated portfolio
     df.to_csv(portfolio_file, index=False)
-    print(f"Portfolio updated: {len(buy_list)} buys, {len(sell_list)} sells")
+    
+    remaining_cash = available_cash - total_investment
+    print(f"\nInitial portfolio updated: {len(buy_list)} positions, {len(sell_list)} sells")
+    print(f"Total invested: ₹{total_investment:,.2f}")
+    print(f"Initial remaining cash: ₹{remaining_cash:,.2f}")
+    
+    # Redistribute remaining cash to minimize leftover cash
+    df, final_remaining_cash = redistribute_remaining_cash(df, nse200_df, remaining_cash)
+    
+    # Update cash position with final remaining amount
+    cash_row = df[df['Symbol'] == 'CASH']
+    if cash_row.empty:
+        cash_row = pd.DataFrame({'Symbol': ['CASH'], 'Units': [final_remaining_cash]})
+        df = pd.concat([df, cash_row], ignore_index=True)
+    else:
+        df.loc[df['Symbol'] == 'CASH', 'Units'] = final_remaining_cash
+    
+    df.to_csv(portfolio_file, index=False)
+    
+    print(f"\nFINAL SUMMARY:")
+    print(f"Portfolio positions: {len(df[df['Symbol'] != 'CASH'])} stocks")
+    print(f"Cash remaining: ₹{final_remaining_cash:,.2f}")
+    
+    # Calculate cash utilization percentage
+    cash_utilization = ((available_cash - final_remaining_cash) / available_cash) * 100
+    print(f"Cash utilization: {cash_utilization:.1f}%")
 
 
 def print_portfolio_summary(buy_list: List[str], sell_list: List[str], hold_list: List[str]) -> None:
@@ -316,3 +424,313 @@ def cleanup_expired_cache() -> int:
     """
     from cache import api_cache
     return api_cache.clear_expired()
+
+
+def get_current_price(instkey: str, max_retries: int = 3, debug: bool = False) -> Optional[float]:
+    """
+    Get current price for a stock with multiple fallback strategies
+    
+    Args:
+        instkey: Upstox instrument key
+        max_retries: Maximum number of API retries per strategy
+        debug: Enable debug output
+    
+    Returns:
+        Current price or None if all strategies failed
+    """
+    from datetime import date, timedelta
+    
+    # Strategy 1: Try daily data for last 10 days (handles weekends/holidays)
+    strategies = [
+        {"interval": "day", "days_back": 10, "description": "Daily data (10 days)"},
+        {"interval": "day", "days_back": 30, "description": "Daily data (30 days)"},
+        {"interval": "month", "days_back": 90, "description": "Monthly data (90 days)"},
+    ]
+    
+    headers = get_api_headers()
+    
+    for strategy in strategies:
+        if debug:
+            print(f"  Trying {strategy['description']} for {instkey}")
+        
+        end_date = str(date.today())
+        start_date = str(date.today() - timedelta(days=strategy['days_back']))
+        url = f"{UPSTOX_BASE_URL}/historical-candle/{instkey}/{strategy['interval']}/{end_date}/{start_date}"
+        
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(url, headers=headers, timeout=30)
+                
+                if resp.status_code == 429:  # Rate limit
+                    if debug:
+                        print(f"    Rate limited, waiting {2 ** attempt}s")
+                    time.sleep(2 ** attempt)
+                    continue
+                    
+                if resp.status_code != 200:
+                    if debug and attempt == max_retries - 1:
+                        print(f"    HTTP error: {resp.status_code}")
+                    continue
+                    
+                rjson = resp.json()
+                
+                if rjson.get("status") != "success":
+                    if debug and attempt == max_retries - 1:
+                        print(f"    API error: {rjson.get('status')}")
+                    continue
+                
+                candles = rjson.get("data", {}).get("candles", [])
+                if candles:
+                    # Get the latest closing price (most recent candle)
+                    candles.sort(key=datesort, reverse=True)  # Sort by date, newest first
+                    latest_price = float(candles[0][4])  # Closing price
+                    
+                    if debug:
+                        print(f"    Success: ₹{latest_price:.2f} using {strategy['description']}")
+                    
+                    return latest_price
+                else:
+                    if debug and attempt == max_retries - 1:
+                        print(f"    No candle data available")
+                
+            except requests.exceptions.RequestException as e:
+                if debug and attempt == max_retries - 1:
+                    print(f"    Request error: {e}")
+                time.sleep(2 ** attempt)
+            except Exception as e:
+                if debug and attempt == max_retries - 1:
+                    print(f"    Unexpected error: {e}")
+        
+        # Small delay between strategies to avoid rate limiting
+        time.sleep(0.5)
+    
+    # All strategies failed
+    if debug:
+        print(f"  All price strategies failed for {instkey}")
+    
+    return None
+
+
+def calculate_portfolio_value(portfolio: pd.DataFrame, nse200_df: pd.DataFrame) -> float:
+    """
+    Calculate current portfolio value
+    
+    Args:
+        portfolio: Current portfolio DataFrame
+        nse200_df: NSE200 data with instrument keys
+        
+    Returns:
+        Total portfolio value
+    """
+    total_value = 0.0
+    
+    for _, row in portfolio.iterrows():
+        symbol = row['Symbol']
+        units = row['Units']
+        
+        if units == 0:
+            continue
+            
+        # Find instrument key for this symbol
+        nse_row = nse200_df[nse200_df['Symbol'] == symbol]
+        if nse_row.empty:
+            print(f"Warning: {symbol} not found in NSE200 data")
+            continue
+            
+        instkey = nse_row.iloc[0]['instrument_key']
+        current_price = get_current_price(instkey)
+        
+        if current_price is not None:
+            total_value += units * current_price
+        else:
+            print(f"Warning: Could not get price for {symbol}")
+    
+    return total_value
+
+
+def calculate_units_to_buy(symbol: str, instkey: str, allocation_amount: float, use_fallback: bool = True, debug: bool = False) -> Tuple[int, float]:
+    """
+    Calculate how many units to buy with given allocation and return the price used
+    
+    Args:
+        symbol: Stock symbol
+        instkey: Upstox instrument key
+        allocation_amount: Amount to allocate for this stock
+        use_fallback: Use fallback price estimation if API fails
+        debug: Enable debug output
+        
+    Returns:
+        Tuple of (units_to_buy, price_used)
+    """
+    if debug:
+        print(f"  Attempting to get price for {symbol} ({instkey})")
+    
+    current_price = get_current_price(instkey, debug=debug)
+    
+    if current_price is None and use_fallback:
+        if debug:
+            print(f"  API failed, trying fallback estimation...")
+        # Fallback: Use historical return data to estimate current price
+        fallback_price = estimate_price_from_returns(symbol, instkey)
+        if fallback_price:
+            current_price = fallback_price
+            print(f"  Using estimated price for {symbol}: ₹{current_price:.2f} (API failed)")
+        elif debug:
+            print(f"  Fallback estimation also failed for {symbol}")
+    
+    if current_price is None:
+        if debug:
+            print(f"  All price methods failed for {symbol}")
+        return 0, 0.0
+    
+    units = int(allocation_amount // current_price)
+    if debug:
+        print(f"  {symbol}: ₹{allocation_amount:.2f} ÷ ₹{current_price:.2f} = {units} units")
+    
+    return units, current_price
+
+
+def estimate_price_from_returns(symbol: str, instkey: str, weeks: int = 4) -> Optional[float]:
+    """
+    Estimate current stock price using recent returns data
+    
+    Args:
+        symbol: Stock symbol  
+        instkey: Upstox instrument key
+        weeks: Number of weeks of data to use for estimation
+        
+    Returns:
+        Estimated current price or None if failed
+    """
+    try:
+        # Get recent returns data (which we know works since it's used in the main algorithm)
+        returns_data = get_returns(instkey, weeks)
+        
+        if returns_data is None:
+            return None
+        
+        # This is a rough estimation based on typical NSE stock price ranges
+        # We can improve this later by storing historical prices or using other data
+        
+        # Estimate based on symbol characteristics (large cap vs mid/small cap)
+        large_cap_symbols = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'BHARTIARTL', 'ITC', 'LT'}
+        mid_cap_symbols = {'ZOMATO', 'PAYTM', 'POLICYBZR'}
+        
+        if symbol in large_cap_symbols:
+            estimated_price = 2000  # Rough estimate for large cap
+        elif symbol in mid_cap_symbols:
+            estimated_price = 500   # Rough estimate for mid cap  
+        else:
+            estimated_price = 1000  # Default estimate
+        
+        # Adjust based on returns (if stock has done well, might be higher priced)
+        if returns_data > 0.5:  # 50%+ returns
+            estimated_price *= 1.5
+        elif returns_data > 0.2:  # 20%+ returns  
+            estimated_price *= 1.2
+        elif returns_data < -0.2:  # -20% returns
+            estimated_price *= 0.8
+        
+        return float(estimated_price)
+        
+    except Exception as e:
+        print(f"Price estimation failed for {symbol}: {e}")
+        return None
+
+
+def redistribute_remaining_cash(df: pd.DataFrame, nse200_df: pd.DataFrame, remaining_cash: float, min_cash_threshold: float = 1000) -> Tuple[pd.DataFrame, float]:
+    """
+    Redistribute remaining cash among existing stock positions to minimize leftover cash
+    
+    Args:
+        df: Current portfolio DataFrame
+        nse200_df: NSE200 data with instrument keys
+        remaining_cash: Amount of cash to redistribute
+        min_cash_threshold: Minimum cash to keep (default: ₹1000)
+        
+    Returns:
+        Tuple of (updated_df, final_remaining_cash)
+    """
+    if remaining_cash <= min_cash_threshold:
+        return df, remaining_cash
+    
+    cash_to_redistribute = remaining_cash - min_cash_threshold
+    print(f"\nRedistributing ₹{cash_to_redistribute:,.2f} among existing positions...")
+    
+    # Get stock positions (exclude CASH)
+    stock_positions = df[df['Symbol'] != 'CASH'].copy()
+    if stock_positions.empty:
+        return df, remaining_cash
+    
+    # Create list of (symbol, price, instkey) for stocks that we can buy more of
+    buyable_stocks = []
+    for _, row in stock_positions.iterrows():
+        symbol = row['Symbol']
+        
+        # Find instrument key
+        nse_row = nse200_df[nse200_df['Symbol'] == symbol]
+        if not nse_row.empty:
+            instkey = nse_row.iloc[0]['instrument_key']
+            current_price = get_current_price(instkey, debug=False)
+            
+            if current_price and current_price <= cash_to_redistribute:
+                buyable_stocks.append({
+                    'symbol': symbol,
+                    'price': current_price,
+                    'instkey': instkey,
+                    'current_units': row['Units']
+                })
+    
+    if not buyable_stocks:
+        print("No stocks affordable with remaining cash")
+        return df, remaining_cash
+    
+    # Sort by price (cheapest first) for better utilization
+    buyable_stocks.sort(key=lambda x: x['price'])
+    
+    redistributed_amount = 0
+    redistribution_summary = []
+    
+    # Keep buying additional shares until we run out of cash
+    while cash_to_redistribute >= min(stock['price'] for stock in buyable_stocks):
+        # Try to buy one share of each affordable stock in rotation
+        bought_this_round = False
+        
+        for stock in buyable_stocks:
+            if cash_to_redistribute >= stock['price']:
+                # Buy one more unit of this stock
+                cash_to_redistribute -= stock['price']
+                redistributed_amount += stock['price']
+                
+                # Update the DataFrame
+                df.loc[df['Symbol'] == stock['symbol'], 'Units'] += 1
+                
+                # Track for summary
+                existing_entry = next((item for item in redistribution_summary if item['symbol'] == stock['symbol']), None)
+                if existing_entry:
+                    existing_entry['additional_units'] += 1
+                    existing_entry['amount'] += stock['price']
+                else:
+                    redistribution_summary.append({
+                        'symbol': stock['symbol'],
+                        'additional_units': 1,
+                        'amount': stock['price'],
+                        'price': stock['price']
+                    })
+                
+                bought_this_round = True
+        
+        if not bought_this_round:
+            break
+    
+    # Print redistribution summary
+    if redistribution_summary:
+        print("Cash redistribution summary:")
+        for item in redistribution_summary:
+            print(f"  {item['symbol']}: +{item['additional_units']} units @ ₹{item['price']:.2f} = ₹{item['amount']:,.2f}")
+    
+    final_remaining_cash = min_cash_threshold + cash_to_redistribute
+    print(f"Redistributed: ₹{redistributed_amount:,.2f}")
+    print(f"Final remaining cash: ₹{final_remaining_cash:,.2f}")
+    
+    return df, final_remaining_cash
