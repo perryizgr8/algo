@@ -5,7 +5,8 @@
       "Bash(.venv/Scripts/python.exe test_dryrun.py:*)",
       "Bash(rm:*)",
       "Bash(.venv/Scripts/python.exe:*)",
-      "WebFetch(domain:www.nseindia.com)"
+      "WebFetch(domain:www.nseindia.com)",
+      "Bash(.venv/Scripts/pip install:*)"
     ],
     "deny": []
   }
